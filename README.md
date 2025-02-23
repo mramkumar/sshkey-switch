@@ -13,7 +13,7 @@ SSH-Switch is a command-line utility that allows users to easily switch between 
 
 ## Installation
 ```sh
-# 
+# pip install ssh-switch
 ```
 
 ## Usage
