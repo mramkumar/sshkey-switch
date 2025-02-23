@@ -24,11 +24,12 @@ Follow the on-screen instructions to select an SSH key.
 
 ## Example Output
 ```
-Select SSH private key:
-1) id_rsa
-2) github_key
-3) deploy_key
-#? 2
+# ssh-switch
+? Select SSH private key: (Use arrow keys)
+ » deploy1 *recent
+   github_repo1
+   id_rsa
+   gitlab_repo2
 ✅ SSH key switched to: ~/.ssh/github_key
 ✅ ssh-agent is working correctly.
 ```
