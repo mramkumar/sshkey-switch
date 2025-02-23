@@ -18,7 +18,7 @@ SSH-Switch is a command-line utility that allows users to easily switch between 
 
 ## Usage
 ```sh
-ssh-switch
+# ssh-switch
 ```
 Follow the on-screen instructions to select an SSH key.
 
