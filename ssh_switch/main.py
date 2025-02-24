@@ -3,211 +3,220 @@
 import os
 import re
 import stat
-import shutil
 import subprocess
-import questionary
+import platform
 from pathlib import Path
+import questionary
+from collections import OrderedDict
 
 SSH_DIR = Path.home() / ".ssh"
 RECENT_KEYS_FILE = Path.home() / ".ssh_recent_keys"
-
 SSH_ENV_FILE = Path.home() / ".ssh-agent-env"
+
 BASHRC_FILE = Path.home() / ".bashrc"
 ZSHRC_FILE = Path.home() / ".zshrc"
 
+max_keys_per_page = 5
+
+def get_os_shell_profile():
+    """Return the correct shell profile file based on OS."""
+    return ZSHRC_FILE if platform.system() == "Darwin" else BASHRC_FILE
+
+
 def ensure_ssh_agent_auto_start():
-    """Ensure SSH agent auto-start is added to shell profile and effective."""
-    snippet = '\n# Auto-load ssh-agent environment\nif [ -f ~/.ssh-agent-env ]; then\n    source ~/.ssh-agent-env > /dev/null\nfi\n'
+    """Ensure SSH agent environment is auto-loaded in shell profile."""
+    shell_profile = get_os_shell_profile()
+    snippet = (
+        "\n# Auto-load ssh-agent environment\n"
+        "if [ -f ~/.ssh-agent-env ]; then\n"
+        "    source ~/.ssh-agent-env > /dev/null\n"
+        "fi\n"
+    )
 
-    def add_snippet_if_missing(file_path):
-        """Check if the snippet exists in a shell profile and add it if missing."""
-        if file_path.exists():
-            with open(file_path, "r") as f:
-                if snippet.strip() in f.read():
-                    return  # Snippet already exists, no changes needed
-        with open(file_path, "a") as f:
+    if not shell_profile.exists() or snippet.strip() not in shell_profile.read_text():
+        with shell_profile.open("a") as f:
             f.write(snippet)
-        print(f"✅ Added SSH agent auto-start snippet to {file_path}")
+        print(f"✅ Added SSH agent auto-start snippet to {shell_profile}")
 
-    # Add to ~/.bashrc and ~/.zshrc if they exist
-    add_snippet_if_missing(BASHRC_FILE)
-    add_snippet_if_missing(ZSHRC_FILE)
-
-    # Ensure ~/.ssh-agent-env exists
+def is_ssh_agent_running():
+    """Check if ssh-agent is running and export environment variables."""
     if not SSH_ENV_FILE.exists():
-        SSH_ENV_FILE.touch()
-        print(f"✅ Created {SSH_ENV_FILE} to store ssh-agent environment.")
+        return False
 
-    # Apply changes immediately
-    os.system(f"source {SSH_ENV_FILE} > /dev/null 2>&1")
+    with SSH_ENV_FILE.open("r") as f:
+        env_lines = f.readlines()
 
-def find_ssh_agent():
-    """Find the full path of ssh-agent."""
-    ssh_agent_path = shutil.which("ssh-agent")
-    if not ssh_agent_path:
-        print("❌ Error: ssh-agent not found in system PATH.")
+    ssh_auth_sock, ssh_agent_pid = None, None
+
+    for line in env_lines:
+        if "SSH_AUTH_SOCK" in line:
+            ssh_auth_sock = line.strip().split("=")[1].replace('"', "")
+        if "SSH_AGENT_PID" in line:
+            ssh_agent_pid = line.strip().split("=")[1].replace('"', "")
+
+    if not ssh_auth_sock or not ssh_agent_pid:
+        return False
+
+    # Verify if the SSH_AGENT_PID is still running
+    if subprocess.run(["ps", "-p", ssh_agent_pid], capture_output=True).returncode == 0:
+        os.environ["SSH_AUTH_SOCK"] = ssh_auth_sock
+        os.environ["SSH_AGENT_PID"] = ssh_agent_pid
+        return True
+
+    return False  # Agent is not running, so we need to start a new one
+
+def start_ssh_agent():
+    """Start ssh-agent only if it's not already running."""
+    if is_ssh_agent_running():
+        print("✅ ssh-agent is already running.")
+        return
+
+    result = subprocess.run(["ssh-agent", "-s"], check=True, text=True, capture_output=True)
+    agent_output = result.stdout
+
+    sock_match = re.search(r"SSH_AUTH_SOCK=([^;]+);", agent_output)
+    pid_match = re.search(r"SSH_AGENT_PID=([0-9]+);", agent_output)
+
+    if sock_match and pid_match:
+        with SSH_ENV_FILE.open("w") as f:
+            f.write(f"export SSH_AUTH_SOCK={sock_match.group(1)}\n")
+            f.write(f"export SSH_AGENT_PID={pid_match.group(1)}\n")
+
+        os.environ["SSH_AUTH_SOCK"] = sock_match.group(1)
+        os.environ["SSH_AGENT_PID"] = pid_match.group(1)
+
+        print("✅ ssh-agent started successfully.")
+    else:
+        print("❌ Failed to start ssh-agent.")
         exit(1)
-    return ssh_agent_path
 
-
-def is_private_key(file_path):
-    """Check if a file is a valid SSH private key."""
-    # Skip files with extensions (e.g., .pub files)
-    if file_path.suffix:
-        return False
-
-    # Check file permissions: should be readable and writable only by the owner (0600)
-    try:
-        st = os.stat(file_path)
-        if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO) == 0:
-            return True
-    except Exception:
-        return False
-
-    return False
-
-
-def is_valid_ssh_key(file_path):
-    """Check if a file is a valid SSH private key using ssh-keygen."""
-    try:
-        result = subprocess.run(
-            ["ssh-keygen", "-y", "-f", str(file_path)],
-            capture_output=True,
-            text=True
-        )
-        return result.returncode == 0  # If ssh-keygen succeeds, it's a valid private key
-    except Exception:
-        return False  # If any error occurs, treat it as invalid
+    print("\n👉 To activate the SSH agent environment, run:\n")
+    print(f"\033[1;32m source {get_os_shell_profile()} \033[0m\n")
 
 def list_ssh_keys():
-    """Find all valid SSH private keys in ~/.ssh using ssh-keygen for verification."""
-    private_keys = []
+    """List all valid SSH private keys in ~/.ssh."""
+    return sorted(
+        file for file in SSH_DIR.iterdir()
+        if file.is_file()
+        and not file.suffix
+        and file.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO) == 0
+        and subprocess.run(["ssh-keygen", "-y", "-f", str(file)], check=False, capture_output=True).returncode == 0
+    )
 
-    for file in SSH_DIR.iterdir():
-        if file.is_file() and is_private_key(file) and is_valid_ssh_key(file):
-            private_keys.append(file)
-
-    return sorted(private_keys)
 
 def load_recent_keys():
-    """Load recently used SSH keys from a file."""
+    """Load recently used SSH keys from a file as strings."""
     if RECENT_KEYS_FILE.exists():
         with open(RECENT_KEYS_FILE, "r") as f:
-            return [Path(line.strip()) for line in f.readlines()]
+            return [line.strip() for line in f.readlines()]  # Return strings
     return []
-
 
 def save_recent_key(key_path):
     """Save recently used SSH key to a file."""
+    key_path = str(key_path)  # Ensure key_path is a string
     recent_keys = load_recent_keys()
 
     if key_path in recent_keys:
         recent_keys.remove(key_path)  # Move it to the top
 
     recent_keys.insert(0, key_path)  # Add as most recent
-    recent_keys = recent_keys[:5]  # Keep only the last 5 keys
+    recent_keys = recent_keys[:max_keys_per_page]  # Keep only the last 5 keys
 
     with open(RECENT_KEYS_FILE, "w") as f:
         f.writelines(f"{key}\n" for key in recent_keys)
 
 
-def start_ssh_agent():
-    """Start a new ssh-agent and store environment variables in a file."""
-    ssh_agent_path = find_ssh_agent()
-
-    # Kill any existing ssh-agent (ignoring errors if it doesn't exist)
-    subprocess.run("eval $(ssh-agent -k) > /dev/null 2>&1", shell=True)
-
-    # Start a new ssh-agent and capture its output
-    agent_process = subprocess.run(
-        [ssh_agent_path, "-s"], capture_output=True, text=True
-    )
-    agent_output = agent_process.stdout
-
-    # Extract SSH_AUTH_SOCK and SSH_AGENT_PID
-    sock_match = re.search(r"SSH_AUTH_SOCK=([^;]+);", agent_output)
-    pid_match = re.search(r"SSH_AGENT_PID=([0-9]+);", agent_output)
-
-    if sock_match and pid_match:
-        ssh_env_file = Path.home() / ".ssh-agent-env"
-        with open(ssh_env_file, "w") as f:
-            f.write(f"export SSH_AUTH_SOCK={sock_match.group(1)}\n")
-            f.write(f"export SSH_AGENT_PID={pid_match.group(1)}\n")
-
-        print(f"✅ ssh-agent started. Run `source {ssh_env_file}` to use it.")
-    else:
-        print("❌ Failed to start ssh-agent properly.", file=sys.stderr)
-        exit(1)
-
-
 def switch_ssh_key(key_path):
     """Switch SSH key by removing old keys and adding the new key."""
-    key_full_path = str(Path(key_path).resolve())
-
-    # Load SSH Agent environment variables if they exist
-    ssh_env_file = Path.home() / ".ssh-agent-env"
-    if ssh_env_file.exists():
-        with open(ssh_env_file, "r") as f:
-            env_lines = f.readlines()
-        for line in env_lines:
-            key, value = line.strip().split("=")
-            os.environ[key] = value.replace('"', '')  # Remove quotes if present
-
-    # Ensure ssh-agent is running
-    if not os.environ.get("SSH_AUTH_SOCK"):
+    if not is_ssh_agent_running():
         print("❌ ssh-agent is not running.")
-        print("\n👉 To activate the SSH agent environment, run the following command:\n")
-        print("\033[1;32m source ~/.bashrc \033[0m\n")  # Green bold text
+        print("\n👉 To activate the SSH agent environment, run:\n")
+        print(f"\033[1;32m source {get_os_shell_profile()} \033[0m\n")
         return
 
-
-    # Remove all previously added keys
-    subprocess.run(["ssh-add", "-D"], capture_output=True, text=True)
-
-    # Add the new SSH key
-    result = subprocess.run(["ssh-add", key_full_path], capture_output=True, text=True)
+    subprocess.run(["ssh-add", "-D"], check=False, capture_output=True)
+    result = subprocess.run(["ssh-add", str(Path(key_path).resolve())], check=False, capture_output=True)
 
     if result.returncode == 0:
-        print(f"✅ Switched to SSH key: {key_full_path}")
+        print(f"✅ Switched to SSH key: {key_path}")
+        save_recent_key(key_path)
     else:
         print(f"❌ Failed to add SSH key: {result.stderr.strip()}")
 
 
 def verify_ssh_agent():
-    """Check if ssh-agent is running properly."""
-    result = subprocess.run(["ssh-add", "-l"], capture_output=True, text=True)
+    """Check if ssh-agent is working correctly."""
+    result = subprocess.run(["ssh-add", "-l"], check=False, text=True, capture_output=True)
     if "no identities" in result.stdout.lower():
         print("❌ ssh-agent is running but has no identities loaded.")
     elif result.returncode != 0:
-        print(f"❌ Error verifying ssh-agent: {result.stderr}")
+        print(f"❌ Error verifying ssh-agent: {result.stderr.strip()}")
     else:
         print("✅ ssh-agent is working correctly.")
 
-
 def interactive_key_selection():
-    """Interactive selection of SSH keys using questionary."""
-    all_keys = list_ssh_keys()
-    recent_keys = load_recent_keys()
+    """Interactive selection of SSH keys using left/right arrow pagination."""
+    all_keys = list_ssh_keys()  # Get all available keys
+    recent_keys = load_recent_keys()  # Get recently used keys
 
     if not all_keys:
         print("❌ No valid SSH private keys found in ~/.ssh/")
         return None
 
-    choices = []
-    for key in recent_keys + [k for k in all_keys if k not in recent_keys]:
-        label = f"{key.name} {'*recent' if key in recent_keys else ''}"
-        choices.append(questionary.Choice(label, value=key))
+    all_keys = [Path(key).resolve() for key in all_keys]
+    recent_keys = [Path(key).resolve() for key in recent_keys]
 
-    selected_key = questionary.select(
-        "Select SSH private key:", choices=choices, use_arrow_keys=True
-    ).ask()
-    return selected_key
+    unique_keys = OrderedDict()
 
+    # Add recent keys first (if they exist in all_keys)
+    for key in recent_keys:
+        if key in all_keys:
+            unique_keys[key] = f"{key.name}"
+
+    # Add remaining keys that are not in recent_keys
+    for key in all_keys:
+        if key not in unique_keys:
+            unique_keys[key] = key.name
+
+    key_list = list(unique_keys.items())
+
+    # Pagination setup
+    page = 0
+    total_pages = (len(key_list) + max_keys_per_page - 1) // max_keys_per_page  # Total pages
+
+    while True:
+        start = page * max_keys_per_page
+        end = start + max_keys_per_page
+        display_keys = key_list[start:end]
+
+        choices = [
+            questionary.Choice(label, value=str(key)) for key, label in display_keys
+        ]
+
+        # Add navigation options if there are more pages
+        if page > 0:
+            choices.insert(0, questionary.Choice("⬅️ Previous", value="prev"))
+
+        if end < len(key_list):
+            choices.append(questionary.Choice("➡️ Next", value="next"))
+
+        selected_key = questionary.select(
+            "🔑 Select SSH private key:", choices=choices, use_arrow_keys=True
+        ).ask()
+
+        if selected_key == "next":
+            page += 1  # Go to next page
+        elif selected_key == "prev":
+            page -= 1  # Go to previous page
+        else:
+            return selected_key  # Return selected key
 
 def main():
-    """Main function for selecting and switching SSH keys."""
-    key_path = interactive_key_selection()
+    """Main function to set up ssh-agent and switch keys."""
+    ensure_ssh_agent_auto_start()
+    start_ssh_agent()
 
+    key_path = interactive_key_selection()
     if key_path:
         switch_ssh_key(key_path)
     else:
@@ -215,5 +224,4 @@ def main():
 
 
 if __name__ == "__main__":
-    ensure_ssh_agent_auto_start()
     main()
