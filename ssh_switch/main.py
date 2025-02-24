@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 
+"""
+ssh-switch: A CLI tool to manage SSH keys and switch between them easily.
+
+This script provides functionalities for listing SSH keys, switching between them,
+and managing the ssh-agent environment.
+"""
+
 import os
+import sys
 import re
 import stat
 import subprocess
 import platform
 from pathlib import Path
-import questionary
 from collections import OrderedDict
+import questionary
 
 SSH_DIR = Path.home() / ".ssh"
 RECENT_KEYS_FILE = Path.home() / ".ssh_recent_keys"
@@ -16,12 +24,17 @@ SSH_ENV_FILE = Path.home() / ".ssh-agent-env"
 BASHRC_FILE = Path.home() / ".bashrc"
 ZSHRC_FILE = Path.home() / ".zshrc"
 
-max_keys_per_page = 5
+MAX_KEYS_PER_PAGE = 5
+ACTIVATION_MESSAGE = False 
 
 def get_os_shell_profile():
     """Return the correct shell profile file based on OS."""
     return ZSHRC_FILE if platform.system() == "Darwin" else BASHRC_FILE
 
+def print_ACTIVATION_MESSAGE():
+    """Prints a message to activate the SSH agent environment."""
+    print(f"\n 👉 SSH agent is not correctly configured in the terminal session. To fix this, run:\n")
+    print(f"\033[1;32m source {get_os_shell_profile()} \033[0m\n")
 
 def ensure_ssh_agent_auto_start():
     """Ensure SSH agent environment is auto-loaded in shell profile."""
@@ -39,33 +52,45 @@ def ensure_ssh_agent_auto_start():
         print(f"✅ Added SSH agent auto-start snippet to {shell_profile}")
 
 def is_ssh_agent_running():
-    """Check if ssh-agent is running and export environment variables."""
+
+    global ACTIVATION_MESSAGE
+
+    """Check if ssh-agent is running and export environment variables if needed."""
     if not SSH_ENV_FILE.exists():
         return False
 
     with SSH_ENV_FILE.open("r") as f:
         env_lines = f.readlines()
 
-    ssh_auth_sock, ssh_agent_pid = None, None
+    file_ssh_auth_sock, file_ssh_agent_pid = None, None
 
     for line in env_lines:
         if "SSH_AUTH_SOCK" in line:
-            ssh_auth_sock = line.strip().split("=")[1].replace('"', "")
+            file_ssh_auth_sock = line.strip().split("=")[1].replace('"', "")
         if "SSH_AGENT_PID" in line:
-            ssh_agent_pid = line.strip().split("=")[1].replace('"', "")
+            file_ssh_agent_pid = line.strip().split("=")[1].replace('"', "")
 
-    if not ssh_auth_sock or not ssh_agent_pid:
+    if not file_ssh_auth_sock or not file_ssh_agent_pid:
         return False
 
-    # Verify if the SSH_AGENT_PID is still running
-    if subprocess.run(["ps", "-p", ssh_agent_pid], capture_output=True).returncode == 0:
-        os.environ["SSH_AUTH_SOCK"] = ssh_auth_sock
-        os.environ["SSH_AGENT_PID"] = ssh_agent_pid
-        return True
+    # Get current terminal environment variables
+    env_ssh_auth_sock = os.environ.get("SSH_AUTH_SOCK")
+    env_ssh_agent_pid = os.environ.get("SSH_AGENT_PID")
+
+    # Check if the agent process is running
+    if subprocess.run(["ps", "-p", file_ssh_agent_pid], capture_output=True).returncode == 0:
+        # If the values in the environment and file differ, update them
+        if file_ssh_auth_sock != env_ssh_auth_sock or file_ssh_agent_pid != env_ssh_agent_pid:
+            ACTIVATION_MESSAGE = True
+
+        return True  # Agent is running and environment is up to date
 
     return False  # Agent is not running, so we need to start a new one
 
 def start_ssh_agent():
+    
+    global ACTIVATION_MESSAGE
+
     """Start ssh-agent only if it's not already running."""
     if is_ssh_agent_running():
         print("✅ ssh-agent is already running.")
@@ -88,10 +113,9 @@ def start_ssh_agent():
         print("✅ ssh-agent started successfully.")
     else:
         print("❌ Failed to start ssh-agent.")
-        exit(1)
+        sys.exit(1)
 
-    print("\n👉 To activate the SSH agent environment, run:\n")
-    print(f"\033[1;32m source {get_os_shell_profile()} \033[0m\n")
+    ACTIVATION_MESSAGE = True
 
 def list_ssh_keys():
     """List all valid SSH private keys in ~/.ssh."""
@@ -100,9 +124,10 @@ def list_ssh_keys():
         if file.is_file()
         and not file.suffix
         and file.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO) == 0
-        and subprocess.run(["ssh-keygen", "-y", "-f", str(file)], check=False, capture_output=True).returncode == 0
+        and subprocess.run(
+            ["ssh-keygen", "-y", "-f", str(file)], check=False, capture_output=True
+            ).returncode == 0
     )
-
 
 def load_recent_keys():
     """Load recently used SSH keys from a file as strings."""
@@ -120,29 +145,32 @@ def save_recent_key(key_path):
         recent_keys.remove(key_path)  # Move it to the top
 
     recent_keys.insert(0, key_path)  # Add as most recent
-    recent_keys = recent_keys[:max_keys_per_page]  # Keep only the last 5 keys
+    recent_keys = recent_keys[:MAX_KEYS_PER_PAGE]  # Keep only the last 5 keys
 
     with open(RECENT_KEYS_FILE, "w") as f:
         f.writelines(f"{key}\n" for key in recent_keys)
 
 
 def switch_ssh_key(key_path):
+
+    global ACTIVATION_MESSAGE
+    
     """Switch SSH key by removing old keys and adding the new key."""
     if not is_ssh_agent_running():
         print("❌ ssh-agent is not running.")
-        print("\n👉 To activate the SSH agent environment, run:\n")
-        print(f"\033[1;32m source {get_os_shell_profile()} \033[0m\n")
+        ACTIVATION_MESSAGE = True
         return
 
     subprocess.run(["ssh-add", "-D"], check=False, capture_output=True)
-    result = subprocess.run(["ssh-add", str(Path(key_path).resolve())], check=False, capture_output=True)
+    result = subprocess.run(
+        ["ssh-add", str(Path(key_path).resolve())], check=False, capture_output=True
+        )
 
     if result.returncode == 0:
         print(f"✅ Switched to SSH key: {key_path}")
         save_recent_key(key_path)
     else:
         print(f"❌ Failed to add SSH key: {result.stderr.strip()}")
-
 
 def verify_ssh_agent():
     """Check if ssh-agent is working correctly."""
@@ -182,11 +210,10 @@ def interactive_key_selection():
 
     # Pagination setup
     page = 0
-    total_pages = (len(key_list) + max_keys_per_page - 1) // max_keys_per_page  # Total pages
 
     while True:
-        start = page * max_keys_per_page
-        end = start + max_keys_per_page
+        start = page * MAX_KEYS_PER_PAGE
+        end = start + MAX_KEYS_PER_PAGE
         display_keys = key_list[start:end]
 
         choices = [
@@ -222,6 +249,8 @@ def main():
     else:
         print("❌ No key selected. Exiting.")
 
+    if ACTIVATION_MESSAGE:
+        print_ACTIVATION_MESSAGE()  
 
 if __name__ == "__main__":
     main()
