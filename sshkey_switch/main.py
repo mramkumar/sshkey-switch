@@ -10,9 +10,8 @@ and managing the ssh-agent environment.
 import os
 import sys
 import re
-import stat
+import shutil
 import subprocess
-import platform
 from pathlib import Path
 from collections import OrderedDict
 import questionary
@@ -20,16 +19,36 @@ import questionary
 SSH_DIR = Path.home() / ".ssh"
 RECENT_KEYS_FILE = Path.home() / ".ssh_recent_keys"
 SSH_ENV_FILE = Path.home() / ".ssh-agent-env"
+SSH_AGENT_BIN = shutil.which("ssh-agent")
 
 BASHRC_FILE = Path.home() / ".bashrc"
 ZSHRC_FILE = Path.home() / ".zshrc"
 
 MAX_KEYS_PER_PAGE = 5
 ACTIVATION_MESSAGE = False 
+EXCLUDE_FILES = {"authorized_keys", "known_hosts"}
 
-def get_os_shell_profile():
-    """Return the correct shell profile file based on OS."""
-    return ZSHRC_FILE if platform.system() == "Darwin" else BASHRC_FILE
+def get_os_shell_profile() -> Path | None:
+    """Returns the appropriate shell profile file path based on the user's current shell."""
+    shell = os.getenv("SHELL", "").split('/')[-1].lower()
+
+    shell_profiles = {
+        "bash": BASHRC_FILE,
+        "zsh": ZSHRC_FILE
+    }
+
+    return shell_profiles.get(shell, None)  # Return None for unsupported shells
+
+def check_ssh_environment():
+    """Check if /root/.ssh directory and ssh-agent binary exist."""
+    
+    if not SSH_DIR.exists():
+        print(f"❌ Error: {SSH_DIR} does not exist. Please create it using: mkdir -p {SSH_DIR}")
+        sys.exit(1)  # Exit with error
+    
+    if not SSH_AGENT_BIN:
+        print("❌ Error: ssh-agent binary not found. Please install OpenSSH client package.")
+        sys.exit(1)  # Exit with error
 
 def print_ACTIVATION_MESSAGE():
     """Prints a message to activate the SSH agent environment."""
@@ -39,6 +58,11 @@ def print_ACTIVATION_MESSAGE():
 def ensure_ssh_agent_auto_start():
     """Ensure SSH agent environment is auto-loaded in shell profile."""
     shell_profile = get_os_shell_profile()
+
+    if shell_profile is None:
+        print("\n❌ Unsupported shell detected. This utility only supports Bash and Zsh.\n")
+        sys.exit(1)
+
     snippet = (
         "\n# Auto-load ssh-agent environment\n"
         "if [ -f ~/.ssh-agent-env ]; then\n"
@@ -117,16 +141,27 @@ def start_ssh_agent():
 
     ACTIVATION_MESSAGE = True
 
+def is_ssh_private_key(file: Path) -> bool:
+    """Check if the first and last line indicate an SSH private key."""
+    try:
+        with file.open("r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+            last_line = ""
+            for line in f:  # Read till the last line safely
+                last_line = line.strip()
+
+            return (
+                first_line.startswith("-") and "BEGIN" in first_line and
+                last_line.startswith("-") and "END" in last_line
+            )
+    except Exception:
+        return False  # Skip unreadable files
+
 def list_ssh_keys():
-    """List all valid SSH private keys in ~/.ssh."""
+    """List all SSH private keys in ~/.ssh, excluding non-key files."""
     return sorted(
         file for file in SSH_DIR.iterdir()
-        if file.is_file()
-        and not file.suffix
-        and file.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO) == 0
-        and subprocess.run(
-            ["ssh-keygen", "-y", "-f", str(file)], check=False, capture_output=True
-            ).returncode == 0
+        if file.is_file() and file.name not in EXCLUDE_FILES and is_ssh_private_key(file)
     )
 
 def load_recent_keys():
@@ -149,7 +184,6 @@ def save_recent_key(key_path):
 
     with open(RECENT_KEYS_FILE, "w") as f:
         f.writelines(f"{key}\n" for key in recent_keys)
-
 
 def switch_ssh_key(key_path):
 
@@ -240,6 +274,7 @@ def interactive_key_selection():
 
 def main():
     """Main function to set up ssh-agent and switch keys."""
+    check_ssh_environment()
     ensure_ssh_agent_auto_start()
     start_ssh_agent()
 
