@@ -11,6 +11,7 @@ import os
 import sys
 import re
 import shutil
+import platform
 import subprocess
 from pathlib import Path
 from collections import OrderedDict
@@ -28,16 +29,9 @@ MAX_KEYS_PER_PAGE = 5
 ACTIVATION_MESSAGE = False 
 EXCLUDE_FILES = {"authorized_keys", "known_hosts"}
 
-def get_os_shell_profile() -> Path | None:
-    """Returns the appropriate shell profile file path based on the user's current shell."""
-    shell = os.getenv("SHELL", "").split('/')[-1].lower()
-
-    shell_profiles = {
-        "bash": BASHRC_FILE,
-        "zsh": ZSHRC_FILE
-    }
-
-    return shell_profiles.get(shell, None)  # Return None for unsupported shells
+def get_os_shell_profile():
+     """Return the correct shell profile file based on OS."""
+     return ZSHRC_FILE if platform.system() == "Darwin" else BASHRC_FILE
 
 def check_ssh_environment():
     """Check if /root/.ssh directory and ssh-agent binary exist."""
