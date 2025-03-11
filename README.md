@@ -27,16 +27,7 @@ sshkey-switch is a command-line utility that allows users to easily switch betwe
 Follow the on-screen instructions to select an SSH key.
 
 ## Example Output
-```
-# sshkey-switch
-? Select SSH private key: (Use arrow keys)
- » deploy1 *recent
-   github_repo1
-   id_rsa
-   gitlab_repo2
-✅ SSH key switched to: ~/.ssh/github_key
-✅ ssh-agent is working correctly.
-```
+<img src="sshkey-switch.gif" width="1200"/>
 
 ## Notes
 - Ensure you run `source ~/.bashrc` if prompted to activate environment variables.
